@@ -17,14 +17,14 @@ RELEASE_MSG ?= "koperator release"
 
 REL_TAG = $(shell ./scripts/increment_version.sh -${RELEASE_TYPE} ${TAG})
 
-GOLANGCI_VERSION = 1.51.2
-LICENSEI_VERSION = 0.8.0
+GOLANGCI_VERSION = 1.55.2
+LICENSEI_VERSION = 0.9.0
 GOPROXY=https://proxy.golang.org
 
-CONTROLLER_GEN_VERSION = v0.9.2
+CONTROLLER_GEN_VERSION = v0.13.0
 CONTROLLER_GEN = $(PWD)/bin/controller-gen
 
-ENVTEST_K8S_VERSION = 1.24.x!
+ENVTEST_K8S_VERSION = 1.27.x!
 
 KUSTOMIZE_BASE = config/overlays/specific-manager-version
 
@@ -85,7 +85,8 @@ install-kustomize: ## Install kustomize.
 		scripts/install_kustomize.sh;\
 	fi
 
-test: generate fmt vet manifests bin/setup-envtest ## Run unit and integration (non-e2e) tests.
+# Run tests
+test: generate fmt vet bin/setup-envtest
 	cd api && go test ./...
 	KUBEBUILDER_ASSETS=$$($(BIN_DIR)/setup-envtest --print path --bin-dir $(BIN_DIR) use $(ENVTEST_K8S_VERSION)) \
 	go test ./... \
@@ -111,7 +112,7 @@ manager: generate fmt vet ## Generate (kubebuilder) and build manager binary.
 	go build -o bin/manager main.go
 
 # Run against the configured Kubernetes cluster in ~/.kube/config
-run: generate fmt vet manifests ## Run the generated manager against the configured Kubernetes cluster.
+run: generate fmt vet
 	go run ./main.go
 
 # Install CRDs into a cluster by manually creating or replacing the CRD depending on whether is currently existing
@@ -223,7 +224,7 @@ license-header-fix: gen-license-header bin/addlicense ## Fix missing license hea
 		$(ADDLICENSE_OPTS_IGNORE) \
 		$(ADDLICENSE_SOURCE_DIRS)
 
-GOTEMPLATE_VERSION := 3.7.3
+GOTEMPLATE_VERSION := 3.7.5
 
 bin/gotemplate: $(BIN_DIR)/gotemplate-$(GOTEMPLATE_VERSION) ## Symlink gotemplate-<version> into versionless gotemplate.
 	@ln -sf gotemplate-$(GOTEMPLATE_VERSION) $(BIN_DIR)/gotemplate

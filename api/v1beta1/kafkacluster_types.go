@@ -16,11 +16,12 @@ package v1beta1
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"emperror.dev/errors"
 
-	"github.com/imdario/mergo"
+	"dario.cat/mergo"
 
 	"github.com/banzaicloud/istio-client-go/pkg/networking/v1beta1"
 
@@ -152,6 +153,8 @@ type KafkaClusterSpec struct {
 	Brokers                     []Broker                `json:"brokers"`
 	DisruptionBudget            DisruptionBudget        `json:"disruptionBudget,omitempty"`
 	RollingUpgradeConfig        RollingUpgradeConfig    `json:"rollingUpgradeConfig"`
+	// Selector for broker pods that need to be recycled/reconciled
+	TaintedBrokersSelector *metav1.LabelSelector `json:"taintedBrokersSelector,omitempty"`
 	// +kubebuilder:validation:Enum=envoy;istioingress
 	// IngressController specifies the type of the ingress controller to be used for external listeners. The `istioingress` ingress controller type requires the `spec.istioControlPlane` field to be populated as well.
 	IngressController string `json:"ingressController,omitempty"`
@@ -446,6 +449,8 @@ type EnvoyConfig struct {
 	// If not specified, the Envoy pods' priority is default to zero
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+	// Template used to generate broker hostnames for tls enabled envoy. %id will be replaced with brokerId value
+	BrokerHostnameTemplate string `json:"brokerHostnameTemplate,omitempty"`
 	// EnableHealthCheckHttp10 is a toggle for adding HTTP1.0 support to Envoy health-check, default false
 	// +optional
 	EnableHealthCheckHttp10 bool `json:"enableHealthCheckHttp10,omitempty"`
@@ -565,6 +570,16 @@ func (c ExternalListenerConfig) GetIngressControllerTargetPort() int32 {
 	return *c.IngressControllerTargetPort
 }
 
+// GetBrokerPort - When TLS is enabled AnyCastPort is enough since hostname based multiplexing
+// is used and not port based one
+func (c ExternalListenerConfig) GetBrokerPort(brokerId int32) int32 {
+	if c.TLSEnabled() {
+		return c.GetAnyCastPort()
+	} else {
+		return c.ExternalStartingPort + brokerId
+	}
+}
+
 // GetServiceAnnotations returns a copy of the ServiceAnnotations field.
 func (c IngressServiceSettings) GetServiceAnnotations() map[string]string {
 	return util.CloneMap(c.ServiceAnnotations)
@@ -576,6 +591,16 @@ func (c IngressServiceSettings) GetServiceType() corev1.ServiceType {
 		return corev1.ServiceTypeLoadBalancer
 	}
 	return c.ServiceType
+}
+
+// Replace %id in brokerHostnameTemplate with actual broker id
+func (c EnvoyConfig) GetBrokerHostname(brokerId int32) string {
+	return strings.Replace(c.BrokerHostnameTemplate, "%id", strconv.Itoa(int(brokerId)), 1)
+}
+
+// We use -1 for ExternalStartingPort value to enable TLS on envoy
+func (c ExternalListenerConfig) TLSEnabled() bool {
+	return c.ExternalStartingPort == -1
 }
 
 // SSLSecrets defines the Kafka SSL secrets
@@ -633,7 +658,7 @@ type IngressServiceSettings struct {
 type ExternalListenerConfig struct {
 	CommonListenerSpec     `json:",inline"`
 	IngressServiceSettings `json:",inline"`
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=-1
 	// +kubebuilder:validation:Maximum=65535
 	// externalStartingPort is added to each broker ID to get the port number that will be used for external access to the broker.
 	// The choice of broker ID and externalStartingPort must satisfy 0 < broker ID + externalStartingPort <= 65535
@@ -659,6 +684,8 @@ type ExternalListenerConfig struct {
 	// if set, it overrides the default `KafkaClusterSpec.IstioIngressConfig` or `KafkaClusterSpec.EnvoyConfig` for this external listener.
 	// +optional
 	Config *Config `json:"config,omitempty"`
+	// TLS secret
+	TLSSecretName string `json:"tlsSecretName,omitempty"`
 }
 
 // Config defines the external access ingress controller configuration
@@ -675,9 +702,16 @@ type IngressConfig struct {
 
 // InternalListenerConfig defines the internal listener config for Kafka
 type InternalListenerConfig struct {
-	CommonListenerSpec              `json:",inline"`
-	UsedForInnerBrokerCommunication bool `json:"usedForInnerBrokerCommunication"`
-	UsedForControllerCommunication  bool `json:"usedForControllerCommunication,omitempty"`
+	CommonListenerSpec             `json:",inline"`
+	UsedForControllerCommunication bool `json:"usedForControllerCommunication,omitempty"`
+	// This following options are helpful when you want to run a Kafka cluster over multiple Kubernetes clusters.
+	// The broker internal ports are computed as the sum of the internalStartingPort and the broker id.
+	// +optional
+	InternalStartingPort int32 `json:"internalStartingPort"`
+	// If set to a non-empty value, the Kafka brokers will use the external hostname for inter broker communication.
+	// The internal lister will will share the same hostname with the external listener that is referenced here.
+	// +optional
+	ExternalListenerForHostname string `json:"externalListenerForHostname,omitempty"`
 }
 
 // CommonListenerSpec defines the common building block for Listener type
@@ -698,6 +732,9 @@ type CommonListenerSpec struct {
 	// +kubebuilder:validation:ExclusiveMinimum=true
 	// +kubebuilder:validation:Maximum=65535
 	ContainerPort int32 `json:"containerPort"`
+	// At least one of the listeners should have this flag enabled
+	// +optional
+	UsedForInnerBrokerCommunication bool `json:"usedForInnerBrokerCommunication"`
 }
 
 func (c *CommonListenerSpec) GetServerSSLCertSecretName() string {

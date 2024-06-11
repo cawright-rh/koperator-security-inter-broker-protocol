@@ -15,16 +15,12 @@
 package kafka
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
 
 	"emperror.dev/errors"
 	"github.com/go-logr/logr"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 
@@ -111,28 +107,11 @@ func (r *Reconciler) getConfigProperties(bConfig *v1beta1.BrokerConfig, id int32
 		log.Error(err, fmt.Sprintf("setting '%s' in broker configuration resulted an error", kafkautils.KafkaConfigBrokerId))
 	}
 
-	// This logic prevents the removal of the mountPath from the broker configmap
-	brokerConfigMapName := fmt.Sprintf(brokerConfigTemplate+"-%d", r.KafkaCluster.Name, id)
-	var brokerConfigMapOld v1.ConfigMap
-	err = r.Client.Get(context.Background(), client.ObjectKey{Name: brokerConfigMapName, Namespace: r.KafkaCluster.GetNamespace()}, &brokerConfigMapOld)
-	if err != nil && !apierrors.IsNotFound(err) {
-		log.Error(err, "getting broker configmap from the Kubernetes API server resulted an error")
-	}
-
-	mountPathsOld, err := getMountPathsFromBrokerConfigMap(&brokerConfigMapOld)
-	if err != nil {
-		log.Error(err, "could not get mountPaths from broker configmap", v1beta1.BrokerIdLabelKey, id)
-	}
-	mountPathsNew := generateStorageConfig(bConfig.StorageConfigs)
-	mountPathsMerged, isMountPathRemoved := mergeMountPaths(mountPathsOld, mountPathsNew)
-
-	if isMountPathRemoved {
-		log.Error(errors.New("removed storage is found in the KafkaCluster CR"), "removing storage from broker is not supported", v1beta1.BrokerIdLabelKey, id, "mountPaths", mountPathsOld, "mountPaths in kafkaCluster CR ", mountPathsNew)
-	}
-
-	if len(mountPathsMerged) != 0 {
-		if err := config.Set(kafkautils.KafkaConfigBrokerLogDirectory, strings.Join(mountPathsMerged, ",")); err != nil {
-			log.Error(err, fmt.Sprintf("setting '%s' in broker configuration resulted an error", kafkautils.KafkaConfigBrokerLogDirectory))
+	// Storage configuration
+	storageConf := generateStorageConfig(bConfig.StorageConfigs)
+	if len(storageConf) > 0 {
+		if err := config.Set(kafkautils.KafkaConfigBrokerLogDirectory, storageConf); err != nil {
+			log.Error(err, "setting log.dirs in broker configuration resulted an error")
 		}
 	}
 
@@ -184,7 +163,7 @@ func (r *Reconciler) configMap(id int32, brokerConfig *v1beta1.BrokerConfig, ext
 	serverPasses map[string]string, clientPass string, superUsers []string, log logr.Logger) *corev1.ConfigMap {
 	brokerConf := &corev1.ConfigMap{
 		ObjectMeta: templates.ObjectMeta(
-			fmt.Sprintf(brokerConfigTemplate+"-%d", r.KafkaCluster.Name, id),
+			fmt.Sprintf(brokerConfigTemplate+"-%d", r.KafkaCluster.Name, id), //nolint:goconst
 			apiutil.MergeLabels(
 				apiutil.LabelsForKafka(r.KafkaCluster.Name),
 				map[string]string{v1beta1.BrokerIdLabelKey: fmt.Sprintf("%d", id)},
@@ -202,13 +181,14 @@ func (r *Reconciler) configMap(id int32, brokerConfig *v1beta1.BrokerConfig, ext
 
 func generateAdvertisedListenerConfig(id int32, l v1beta1.ListenersConfig,
 	extListenerStatuses, intListenerStatuses, controllerIntListenerStatuses map[string]v1beta1.ListenerStatusList) []string {
-	advertisedListenerConfig := make([]string, 0, len(l.ExternalListeners)+len(l.InternalListeners))
+	externalListenerConfig := make([]string, 0, len(l.ExternalListeners))
+	internalListenerConfig := make([]string, 0, len(l.InternalListeners))
 
-	advertisedListenerConfig = appendListenerConfigs(advertisedListenerConfig, id, extListenerStatuses)
-	advertisedListenerConfig = appendListenerConfigs(advertisedListenerConfig, id, intListenerStatuses)
-	advertisedListenerConfig = appendListenerConfigs(advertisedListenerConfig, id, controllerIntListenerStatuses)
+	externalListenerConfig = appendListenerConfigs(externalListenerConfig, id, extListenerStatuses)
+	internalListenerConfig = appendListenerConfigs(internalListenerConfig, id, intListenerStatuses)
+	internalListenerConfig = appendListenerConfigs(internalListenerConfig, id, controllerIntListenerStatuses)
 
-	return advertisedListenerConfig
+	return append(externalListenerConfig, internalListenerConfig...)
 }
 
 func appendListenerConfigs(advertisedListenerConfig []string, id int32,
@@ -275,6 +255,24 @@ func generateListenerSpecificConfig(kcs *v1beta1.KafkaClusterSpec, serverPasses 
 
 	config := properties.NewProperties()
 
+	for _, eListener := range l.ExternalListeners {
+		if eListener.UsedForInnerBrokerCommunication {
+			if interBrokerListenerName == "" {
+				interBrokerListenerName = strings.ToUpper(eListener.Name)
+			} else {
+				log.Error(errors.New("inter broker listener name already set"), "config error")
+			}
+		}
+		upperedListenerType := eListener.Type.ToUpperString()
+		upperedListenerName := strings.ToUpper(eListener.Name)
+		securityProtocolMapConfig = append(securityProtocolMapConfig, fmt.Sprintf("%s:%s", upperedListenerName, upperedListenerType))
+		listenerConfig = append(listenerConfig, fmt.Sprintf("%s://:%d", upperedListenerName, eListener.ContainerPort))
+		// Add external listeners SSL configuration
+		if eListener.Type == v1beta1.SecurityProtocolSSL {
+			generateListenerSSLConfig(config, eListener.Name, eListener.SSLClientAuth, serverPasses[eListener.Name], log)
+		}
+	}
+
 	for _, iListener := range l.InternalListeners {
 		if iListener.UsedForInnerBrokerCommunication {
 			if interBrokerListenerName == "" {
@@ -293,16 +291,6 @@ func generateListenerSpecificConfig(kcs *v1beta1.KafkaClusterSpec, serverPasses 
 		}
 	}
 
-	for _, eListener := range l.ExternalListeners {
-		upperedListenerType := eListener.Type.ToUpperString()
-		upperedListenerName := strings.ToUpper(eListener.Name)
-		securityProtocolMapConfig = append(securityProtocolMapConfig, fmt.Sprintf("%s:%s", upperedListenerName, upperedListenerType))
-		listenerConfig = append(listenerConfig, fmt.Sprintf("%s://:%d", upperedListenerName, eListener.ContainerPort))
-		// Add external listeners SSL configuration
-		if eListener.Type == v1beta1.SecurityProtocolSSL {
-			generateListenerSSLConfig(config, eListener.Name, eListener.SSLClientAuth, serverPasses[eListener.Name], log)
-		}
-	}
 	if err := config.Set(kafkautils.KafkaConfigListenerSecurityProtocolMap, securityProtocolMapConfig); err != nil {
 		log.Error(err, fmt.Sprintf("setting '%s' parameter in broker configuration resulted an error", kafkautils.KafkaConfigListenerSecurityProtocolMap))
 	}

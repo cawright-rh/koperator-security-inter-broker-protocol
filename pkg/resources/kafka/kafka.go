@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -247,7 +248,7 @@ func (r *Reconciler) Reconcile(log logr.Logger) error {
 	if err != nil {
 		return errors.WrapIf(err, "could not update status for external listeners")
 	}
-	intListenerStatuses, controllerIntListenerStatuses := k8sutil.CreateInternalListenerStatuses(r.KafkaCluster)
+	intListenerStatuses, controllerIntListenerStatuses := k8sutil.CreateInternalListenerStatuses(r.KafkaCluster, extListenerStatuses)
 	err = k8sutil.UpdateListenerStatuses(ctx, r.Client, r.KafkaCluster, intListenerStatuses, extListenerStatuses)
 	if err != nil {
 		return errors.WrapIf(err, "failed to update listener statuses")
@@ -575,7 +576,7 @@ func (r *Reconciler) reconcileKafkaPodDelete(ctx context.Context, log logr.Logge
 					log.V(1).Info("pvc for broker deleted", "pvc name", volume.PersistentVolumeClaim.ClaimName, v1beta1.BrokerIdLabelKey, broker.Labels[v1beta1.BrokerIdLabelKey])
 				}
 			}
-			err = k8sutil.DeleteStatus(r.Client, broker.Labels[v1beta1.BrokerIdLabelKey], r.KafkaCluster, log)
+			err = k8sutil.DeleteBrokerStatus(r.Client, broker.Labels[v1beta1.BrokerIdLabelKey], r.KafkaCluster, log)
 			if err != nil {
 				return errors.WrapIfWithDetails(err, "could not delete status for broker", "id", broker.Labels[v1beta1.BrokerIdLabelKey])
 			}
@@ -846,6 +847,7 @@ func (r *Reconciler) updateStatusWithDockerImageAndVersion(brokerId int32, broke
 	return nil
 }
 
+//gocyclo:ignore
 func (r *Reconciler) handleRollingUpgrade(log logr.Logger, desiredPod, currentPod *corev1.Pod, desiredType reflect.Type) error {
 	// Since toleration does not support patchStrategy:"merge,retainKeys",
 	// we need to add all toleration from the current pod if the toleration is set in the CR
@@ -861,11 +863,13 @@ func (r *Reconciler) handleRollingUpgrade(log logr.Logger, desiredPod, currentPo
 		}
 		desiredPod.Spec.Tolerations = uniqueTolerations
 	}
-	// Check if the resource actually updated
+	// Check if the resource actually updated or if labels match TaintedBrokersSelector
 	patchResult, err := patch.DefaultPatchMaker.Calculate(currentPod, desiredPod)
 	switch {
 	case err != nil:
 		log.Error(err, "could not match objects", "kind", desiredType)
+	case r.isPodTainted(log, currentPod):
+		log.Info("pod has tainted labels, deleting it", "pod", currentPod)
 	case patchResult.IsEmpty():
 		if !k8sutil.IsPodContainsTerminatedContainer(currentPod) &&
 			r.KafkaCluster.Status.BrokersState[currentPod.Labels[v1beta1.BrokerIdLabelKey]].ConfigurationState == v1beta1.ConfigInSync &&
@@ -1029,10 +1033,26 @@ func (r *Reconciler) existsTerminatingPodFromAnotherAz(currentPodAz string, term
 	return false
 }
 
+// Checks for match between pod labels and TaintedBrokersSelector
+func (r *Reconciler) isPodTainted(log logr.Logger, pod *corev1.Pod) bool {
+	selector, err := metav1.LabelSelectorAsSelector(r.KafkaCluster.Spec.TaintedBrokersSelector)
+
+	if err != nil {
+		log.Error(err, "Invalid tainted brokers label selector")
+		return false
+	}
+
+	if selector.Empty() {
+		return false
+	}
+	return selector.Matches(labels.Set(pod.Labels))
+}
+
 //nolint:funlen
 func (r *Reconciler) reconcileKafkaPvc(ctx context.Context, log logr.Logger, brokersDesiredPvcs map[string][]*corev1.PersistentVolumeClaim) error {
 	brokersVolumesState := make(map[string]map[string]v1beta1.VolumeState)
 	var brokerIds []string
+	waitForDiskRemovalToFinish := false
 
 	for brokerId, desiredPvcs := range brokersDesiredPvcs {
 		desiredType := reflect.TypeOf(&corev1.PersistentVolumeClaim{})
@@ -1048,6 +1068,67 @@ func (r *Reconciler) reconcileKafkaPvc(ctx context.Context, log logr.Logger, bro
 		)
 
 		log = log.WithValues("kind", desiredType)
+
+		err := r.Client.List(ctx, pvcList,
+			client.InNamespace(r.KafkaCluster.GetNamespace()), matchingLabels)
+		if err != nil {
+			return errorfactory.New(errorfactory.APIFailure{}, err, "getting resource failed", "kind", desiredType)
+		}
+
+		// Handle disk removal
+		if len(pvcList.Items) > len(desiredPvcs) {
+			for _, pvc := range pvcList.Items {
+				foundInDesired := false
+				existingMountPath := pvc.Annotations["mountPath"]
+
+				for _, desiredPvc := range desiredPvcs {
+					desiredMountPath := desiredPvc.Annotations["mountPath"]
+
+					if existingMountPath == desiredMountPath {
+						foundInDesired = true
+						break
+					}
+				}
+
+				if foundInDesired {
+					continue
+				}
+
+				mountPathToRemove := existingMountPath
+				if brokerState, ok := r.KafkaCluster.Status.BrokersState[brokerId]; ok {
+					volumeStateStatus, found := brokerState.GracefulActionState.VolumeStates[mountPathToRemove]
+					if !found {
+						// If the state is not found, it means that the disk removal was done according to the disk removal succeeded branch
+						log.Info("Disk removal was completed, waiting for Rolling Upgrade to remove PVC", "brokerId", brokerId, "mountPath", mountPathToRemove)
+						continue
+					}
+
+					// Check the volume state
+					ccVolumeState := volumeStateStatus.CruiseControlVolumeState
+					switch {
+					case ccVolumeState.IsDiskRemovalSucceeded():
+						if err := r.Client.Delete(ctx, &pvc); err != nil {
+							return errorfactory.New(errorfactory.APIFailure{}, err, "deleting resource failed", "kind", desiredType)
+						}
+						log.Info("resource deleted")
+						err = k8sutil.DeleteVolumeStatus(r.Client, brokerId, mountPathToRemove, r.KafkaCluster, log)
+						if err != nil {
+							return errors.WrapIfWithDetails(err, "could not delete volume status for broker volume", "brokerId", brokerId, "mountPath", mountPathToRemove)
+						}
+					case ccVolumeState.IsDiskRemoval():
+						log.Info("Graceful disk removal is in progress", "brokerId", brokerId, "mountPath", mountPathToRemove)
+						waitForDiskRemovalToFinish = true
+					case ccVolumeState.IsDiskRebalance():
+						log.Info("Graceful disk rebalance is in progress, waiting to mark disk for removal", "brokerId", brokerId, "mountPath", mountPathToRemove)
+						waitForDiskRemovalToFinish = true
+					default:
+						brokerVolumesState[mountPathToRemove] = v1beta1.VolumeState{CruiseControlVolumeState: v1beta1.GracefulDiskRemovalRequired}
+						log.Info("Marked the volume for removal", "brokerId", brokerId, "mountPath", mountPathToRemove)
+						waitForDiskRemovalToFinish = true
+					}
+				}
+			}
+		}
 
 		for _, desiredPvc := range desiredPvcs {
 			currentPvc := desiredPvc.DeepCopy()
@@ -1079,8 +1160,10 @@ func (r *Reconciler) reconcileKafkaPvc(ctx context.Context, log logr.Logger, bro
 					alreadyCreated = true
 					// Checking pvc state, if bounded, so the broker has already restarted and the CC GracefulDiskRebalance has not happened yet,
 					// then we make it happening with status update.
-					if _, ok := r.KafkaCluster.Status.BrokersState[brokerId].GracefulActionState.VolumeStates[mountPath]; !ok &&
-						currentPvc.Status.Phase == corev1.ClaimBound {
+					// If disk removal was set, and the disk was added back, we also need to mark the volume for rebalance
+					volumeState, found := r.KafkaCluster.Status.BrokersState[brokerId].GracefulActionState.VolumeStates[mountPath]
+					if currentPvc.Status.Phase == corev1.ClaimBound &&
+						(!found || volumeState.CruiseControlVolumeState.IsDiskRemoval()) {
 						brokerVolumesState[mountPath] = v1beta1.VolumeState{CruiseControlVolumeState: v1beta1.GracefulDiskRebalanceRequired}
 					}
 					break
@@ -1135,6 +1218,10 @@ func (r *Reconciler) reconcileKafkaPvc(ctx context.Context, log logr.Logger, bro
 		}
 	}
 
+	if waitForDiskRemovalToFinish {
+		return errorfactory.New(errorfactory.CruiseControlTaskRunning{}, errors.New("Disk removal pending"), "Disk removal pending")
+	}
+
 	return nil
 }
 
@@ -1148,10 +1235,10 @@ func GetBrokersWithPendingOrRunningCCTask(kafkaCluster *v1beta1.KafkaCluster) []
 				(state.GracefulActionState.CruiseControlOperationReference != nil && state.GracefulActionState.CruiseControlState.IsRunningState()) {
 				brokerIDs = append(brokerIDs, kafkaCluster.Spec.Brokers[i].Id)
 			} else {
-				// Check if the volumes are rebalancing
+				// Check if the volumes are rebalancing or removing
 				for _, volumeState := range state.GracefulActionState.VolumeStates {
-					if volumeState.CruiseControlVolumeState == v1beta1.GracefulDiskRebalanceRequired ||
-						(volumeState.CruiseControlOperationReference != nil && volumeState.CruiseControlVolumeState.IsRunningState()) {
+					ccVolumeState := volumeState.CruiseControlVolumeState
+					if ccVolumeState.IsDiskRemoval() || ccVolumeState.IsDiskRebalance() {
 						brokerIDs = append(brokerIDs, kafkaCluster.Spec.Brokers[i].Id)
 					}
 				}
@@ -1165,9 +1252,9 @@ func isDesiredStorageValueInvalid(desired, current *corev1.PersistentVolumeClaim
 	return desired.Spec.Resources.Requests.Storage().Value() < current.Spec.Resources.Requests.Storage().Value()
 }
 
-func (r *Reconciler) getBrokerHost(log logr.Logger, defaultHost string, broker v1beta1.Broker, eListener v1beta1.ExternalListenerConfig) (string, error) {
+func (r *Reconciler) getBrokerHost(log logr.Logger, defaultHost string, broker v1beta1.Broker, eListener v1beta1.ExternalListenerConfig, iConfig v1beta1.IngressConfig) (string, error) {
 	brokerHost := defaultHost
-	portNumber := eListener.ExternalStartingPort + broker.Id
+	portNumber := eListener.GetBrokerPort(broker.Id)
 
 	if eListener.GetAccessMethod() != corev1.ServiceTypeLoadBalancer {
 		bConfig, err := broker.GetBrokerConfig(r.KafkaCluster.Spec)
@@ -1199,6 +1286,12 @@ func (r *Reconciler) getBrokerHost(log logr.Logger, defaultHost string, broker v
 			}
 		} else {
 			brokerHost = fmt.Sprintf("%s-%d-%s.%s%s", r.KafkaCluster.Name, broker.Id, eListener.Name, r.KafkaCluster.Namespace, brokerHost)
+		}
+	}
+	if eListener.TLSEnabled() {
+		brokerHost = iConfig.EnvoyConfig.GetBrokerHostname(broker.Id)
+		if brokerHost == "" {
+			return "", errors.New("brokerHostnameTemplate is not set in the ingress service settings")
 		}
 	}
 	return fmt.Sprintf("%s:%d", brokerHost, portNumber), nil
@@ -1269,7 +1362,7 @@ func (r *Reconciler) createExternalListenerStatuses(log logr.Logger) (map[string
 			}
 
 			for _, broker := range r.KafkaCluster.Spec.Brokers {
-				brokerHostPort, err := r.getBrokerHost(log, host, broker, eListener)
+				brokerHostPort, err := r.getBrokerHost(log, host, broker, eListener, iConfig)
 				if err != nil {
 					return nil, errors.WrapIfWithDetails(err, "could not get brokerHost for external listener status", "brokerID", broker.Id)
 				}

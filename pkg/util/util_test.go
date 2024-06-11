@@ -102,8 +102,10 @@ func TestConvertStringToInt32(t *testing.T) {
 func TestIsSSLEnabledForInternalCommunication(t *testing.T) {
 	lconfig := []v1beta1.InternalListenerConfig{
 		{
-			UsedForInnerBrokerCommunication: true,
-			CommonListenerSpec:              v1beta1.CommonListenerSpec{Type: "ssl"},
+			CommonListenerSpec: v1beta1.CommonListenerSpec{
+				Type:                            "ssl",
+				UsedForInnerBrokerCommunication: true,
+			},
 		},
 	}
 	if !IsSSLEnabledForInternalCommunication(lconfig) {
@@ -111,8 +113,10 @@ func TestIsSSLEnabledForInternalCommunication(t *testing.T) {
 	}
 	lconfig = []v1beta1.InternalListenerConfig{
 		{
-			UsedForInnerBrokerCommunication: true,
-			CommonListenerSpec:              v1beta1.CommonListenerSpec{Type: "plaintext"},
+			CommonListenerSpec: v1beta1.CommonListenerSpec{
+				Type:                            "plaintext",
+				UsedForInnerBrokerCommunication: true,
+			},
 		},
 	}
 	if IsSSLEnabledForInternalCommunication(lconfig) {
@@ -683,6 +687,32 @@ cruise.control.metrics.reporter.kubernetes.mode=true`,
 
 		if !reflect.DeepEqual(test.broker, broker) {
 			t.Errorf("Expected: %v  Got: %v", test.broker, broker)
+		}
+	}
+}
+
+func TestGetMD5Hash(t *testing.T) {
+	testCases := []struct {
+		testName string
+		input    string
+		expected string
+	}{
+		{
+			testName: "empty string",
+			input:    "",
+			expected: "d41d8cd98f00b204e9800998ecf8427e",
+		},
+		{
+			testName: "non-empty string",
+			input:    "test",
+			expected: "098f6bcd4621d373cade4e832627b4f6",
+		},
+	}
+
+	for _, test := range testCases {
+		hash := GetMD5Hash(test.input)
+		if hash != test.expected {
+			t.Errorf("Expected: %s  Got: %s", test.expected, hash)
 		}
 	}
 }

@@ -32,11 +32,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	istioclientv1beta1 "github.com/banzaicloud/istio-client-go/pkg/networking/v1beta1"
 
@@ -111,7 +114,6 @@ func main() {
 
 	// adding indexers to KafkaTopics so that the KafkaTopic admission webhooks could work
 	ctx := context.Background()
-	var managerWatchCacheBuilder cache.NewCacheFunc
 
 	// When operator is started to watch resources in a specific set of namespaces, we use the MultiNamespacedCacheBuilder cache.
 	// In this scenario, it is also suggested to restrict the provided authorization to this namespace by replacing the default
@@ -119,23 +121,35 @@ func main() {
 	// For further information see the kubernetes documentation about
 	// Using [RBAC Authorization](https://kubernetes.io/docs/reference/access-authn-authz/rbac/).
 	var namespaceList []string
+	watchedNamespaces := make(map[string]cache.Config)
 	if namespaces != "" {
 		namespaceList = strings.Split(namespaces, ",")
-		for i := range namespaceList {
-			namespaceList[i] = strings.TrimSpace(namespaceList[i])
-		}
-		managerWatchCacheBuilder = cache.MultiNamespacedCacheBuilder(namespaceList)
+	} else {
+		namespaces = os.Getenv("WATCH_NAMESPACE")
+		namespaceList = strings.Split(namespaces, ",")
+	}
+	for i := range namespaceList {
+		watchedNamespaces[strings.TrimSpace(namespaceList[i])] = cache.Config{}
 	}
 
+	// hash the watched namespaces to allow for more than one operator deployment per namespace
+	// same watched namespaces will return the same hash so only one operator will be active
+	leaderElectionID := fmt.Sprintf("%s-%x", "controller-leader-election-helper", util.GetMD5Hash(namespaces))
+	setupLog.Info("Using leader electrion id", "LeaderElectionID", leaderElectionID, "watched namespaces", namespaceList)
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "controller-leader-election-helper",
-		NewCache:               managerWatchCacheBuilder,
-		Port:                   webhookServerPort,
-		CertDir:                webhookCertDir,
+		Scheme:           scheme,
+		LeaderElection:   enableLeaderElection,
+		LeaderElectionID: leaderElectionID,
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Port:    webhookServerPort,
+			CertDir: webhookCertDir,
+		}),
 		HealthProbeBindAddress: healthProbesAddr,
+		Metrics: server.Options{
+			BindAddress: metricsAddr,
+		},
+		Cache: cache.Options{DefaultNamespaces: watchedNamespaces},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
