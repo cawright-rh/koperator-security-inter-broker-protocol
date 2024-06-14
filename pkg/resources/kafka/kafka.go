@@ -1501,14 +1501,18 @@ func getServiceFromExternalListener(client client.Client, cluster *v1beta1.Kafka
 	case istioingressutils.IngressControllerName:
 		if ingressConfigName == util.IngressConfigGlobalName {
 			iControllerServiceName = fmt.Sprintf(istioingressutils.MeshGatewayNameTemplate, eListenerName, cluster.GetName())
+			iControllerServiceName = strings.ReplaceAll(iControllerServiceName, "_", "-")
 		} else {
 			iControllerServiceName = fmt.Sprintf(istioingressutils.MeshGatewayNameTemplateWithScope, eListenerName, ingressConfigName, cluster.GetName())
+			iControllerServiceName = strings.ReplaceAll(iControllerServiceName, "_", "-")
 		}
 	case envoyutils.IngressControllerName:
 		if ingressConfigName == util.IngressConfigGlobalName {
 			iControllerServiceName = fmt.Sprintf(envoyutils.EnvoyServiceName, eListenerName, cluster.GetName())
+			iControllerServiceName = strings.ReplaceAll(iControllerServiceName, "_", "-")
 		} else {
 			iControllerServiceName = fmt.Sprintf(envoyutils.EnvoyServiceNameWithScope, eListenerName, ingressConfigName, cluster.GetName())
+			iControllerServiceName = strings.ReplaceAll(iControllerServiceName, "_", "-")
 		}
 	}
 
@@ -1584,7 +1588,7 @@ func generateServicePortForIListeners(listeners []v1beta1.InternalListenerConfig
 	var usedPorts []corev1.ServicePort
 	for _, iListener := range listeners {
 		usedPorts = append(usedPorts, corev1.ServicePort{
-			Name:       strings.ReplaceAll(iListener.GetListenerServiceName(), "_", ""),
+			Name:       strings.ReplaceAll(iListener.GetListenerServiceName(), "_", "-"),
 			Port:       iListener.ContainerPort,
 			TargetPort: intstr.FromInt(int(iListener.ContainerPort)),
 			Protocol:   corev1.ProtocolTCP,
@@ -1597,7 +1601,7 @@ func generateServicePortForEListeners(listeners []v1beta1.ExternalListenerConfig
 	var usedPorts []corev1.ServicePort
 	for _, eListener := range listeners {
 		usedPorts = append(usedPorts, corev1.ServicePort{
-			Name:       strings.ReplaceAll(eListener.GetListenerServiceName(), "_", ""),
+			Name:       strings.ReplaceAll(eListener.GetListenerServiceName(), "_", "-"),
 			Protocol:   corev1.ProtocolTCP,
 			Port:       eListener.ContainerPort,
 			TargetPort: intstr.FromInt(int(eListener.ContainerPort)),
