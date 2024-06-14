@@ -88,8 +88,10 @@ func (r *Reconciler) getConfigProperties(bConfig *v1beta1.BrokerConfig, id int32
 	}
 
 	// Add Cruise Control Metrics Reporter configuration
-	if err := config.Set(kafkautils.CruiseControlConfigMetricsReporters, "com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsReporter"); err != nil {
-		log.Error(err, fmt.Sprintf("setting '%s' in broker configuration resulted an error", kafkautils.CruiseControlConfigMetricsReporters))
+	if !strings.Contains(r.KafkaCluster.Spec.ReadOnlyConfig, kafkautils.KafkaConfigSecurityInterBrokerProtocol+"=") {
+		if err := config.Set(kafkautils.CruiseControlConfigMetricsReporters, "com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsReporter"); err != nil {
+			log.Error(err, fmt.Sprintf("setting '%s' in broker configuration resulted an error", kafkautils.CruiseControlConfigMetricsReporters))
+		}
 	}
 	bootstrapServers, err := kafkautils.GetBootstrapServersService(r.KafkaCluster)
 	if err != nil {
