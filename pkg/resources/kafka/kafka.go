@@ -1615,7 +1615,7 @@ func generateServicePortForEListeners(listeners []v1beta1.ExternalListenerConfig
 	var usedPorts []corev1.ServicePort
 	for _, eListener := range listeners {
 		usedPorts = append(usedPorts, corev1.ServicePort{
-			Name:       eListener.GetListenerServiceName(),
+			Name:       strings.ReplaceAll(eListener.GetListenerServiceName(), "_", ""),
 			Protocol:   corev1.ProtocolTCP,
 			Port:       eListener.ContainerPort,
 			TargetPort: intstr.FromInt(int(eListener.ContainerPort)),
