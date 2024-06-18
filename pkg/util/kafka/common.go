@@ -193,9 +193,10 @@ func GetBootstrapServersService(cluster *v1beta1.KafkaCluster) (string, error) {
 func GetBrokerContainerPort(cluster *v1beta1.KafkaCluster) (int32, error) {
 	containerPort := int32(0)
 	for _, lc := range cluster.Spec.ListenersConfig.InternalListeners {
-		// if lc.UsedForKafkaAdminCommunication { // Cannot Currently update the CRD as I do not have permissions
-		// 	return val.ContainerPort
-		// }
+		if lc.UsedForKafkaAdminCommunication { // Cannot Currently update the CRD as I do not have permissions
+			containerPort = lc.ContainerPort
+			break
+		}
 		if lc.UsedForInnerBrokerCommunication && !lc.UsedForControllerCommunication {
 			containerPort = lc.ContainerPort
 			break
@@ -203,11 +204,12 @@ func GetBrokerContainerPort(cluster *v1beta1.KafkaCluster) (int32, error) {
 	}
 
 	for _, lc := range cluster.Spec.ListenersConfig.ExternalListeners {
-		// if lc.UsedForKafkaAdminCommunication { // Cannot Currently update the CRD as I do not have permissions
-		// 	return val.ContainerPort
-		// }
+		if lc.UsedForKafkaAdminCommunication { // Cannot Currently update the CRD as I do not have permissions
+			containerPort = lc.ContainerPort
+			break
+		}
 		if lc.UsedForInnerBrokerCommunication {
-			containerPort = 29092 // temporary solution, needs to be reverted
+			containerPort = lc.ContainerPort
 			break
 		}
 	}
