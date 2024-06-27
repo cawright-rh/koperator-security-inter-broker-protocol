@@ -21678,7 +21678,6 @@ spec:
                             flag enabled
                           type: boolean
                         usedForKafkaAdminCommunication:
-                          description: override for kafka admin communication if external listeners are being used for broker-to-broker communication
                           type: boolean
                       required:
                       - containerPort
@@ -21757,7 +21756,6 @@ spec:
                             flag enabled
                           type: boolean
                         usedForKafkaAdminCommunication:
-                          description: override for kafka admin communication if external listeners are being used for broker-to-broker communication
                           type: boolean
                       required:
                       - containerPort
