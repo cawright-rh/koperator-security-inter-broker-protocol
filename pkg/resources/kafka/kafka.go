@@ -1529,8 +1529,10 @@ func getServiceFromExternalListener(client client.Client, cluster *v1beta1.Kafka
 	case contourutils.IngressControllerName:
 		if ingressConfigName == util.IngressConfigGlobalName {
 			iControllerServiceName = fmt.Sprintf(contourutils.ContourServiceName, eListenerName, cluster.GetName())
+			iControllerServiceName = strings.ReplaceAll(iControllerServiceName, "_", "-")
 		} else {
 			iControllerServiceName = fmt.Sprintf(contourutils.ContourServiceNameWithScope, eListenerName, ingressConfigName, cluster.GetName())
+			iControllerServiceName = strings.ReplaceAll(iControllerServiceName, "_", "-")
 		}
 	}
 
