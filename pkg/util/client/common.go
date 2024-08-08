@@ -37,7 +37,7 @@ func UseSSL(cluster *v1beta1.KafkaCluster) bool {
 
 func getContainerPortForInnerCom(internalListeners []v1beta1.InternalListenerConfig, extListeners []v1beta1.ExternalListenerConfig) int32 {
 	for _, val := range internalListeners {
-		if val.UsedForKafkaAdminCommunication { // Cannot Currently update the CRD as I do not have permissions
+		if val.UsedForKafkaAdminCommunication { // Optional override to return a port from a different listener. Needed if b2b communication is on an external listener and and you want the koperator to interact with kafka over a different port.
 			return val.ContainerPort
 		}
 		if val.UsedForInnerBrokerCommunication {
