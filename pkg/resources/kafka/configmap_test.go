@@ -622,7 +622,6 @@ cruise.control.metrics.reporter.bootstrap.servers=kafka-all-broker.kafka.svc.clu
 cruise.control.metrics.reporter.kubernetes.mode=true
 listener.security.protocol.map=INTERNAL:PLAINTEXT
 listeners=INTERNAL://:9092
-metric.reporters=com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsReporter
 zookeeper.connect=example.zk:2181/
 security.inter.broker.protocol=SASL_SSL`,
 		},
