@@ -21678,6 +21678,9 @@ spec:
                             flag enabled
                           type: boolean
                         usedForKafkaAdminCommunication:
+                          description: UsedForKafkaAdminCommunication allows for a
+                            different port to be returned when the koperator is checking
+                            for the port to use to check if kafka is operating.
                           type: boolean
                       required:
                       - containerPort
@@ -21756,6 +21759,9 @@ spec:
                             flag enabled
                           type: boolean
                         usedForKafkaAdminCommunication:
+                          description: UsedForKafkaAdminCommunication allows for a
+                            different port to be returned when the koperator is checking
+                            for the port to use to check if kafka is operating.
                           type: boolean
                       required:
                       - containerPort
